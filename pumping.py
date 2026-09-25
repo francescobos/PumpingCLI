@@ -17,6 +17,8 @@ import sqlite3
 import hashlib
 import argparse
 import subprocess
+import shutil
+import re
 from pathlib import Path
 
 # Voci neurali predefinite in italiano
@@ -265,9 +267,115 @@ def play_cue(text: str, voice: str, engine: str, db: VoiceDB):
     subprocess.run(cmd)
 
 
+def sanitize_filename(name: str) -> str:
+    name = re.sub(r'[\\/*?:"<>|]', "", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name
+
+
+def fetch_youtube_info(url: str) -> dict:
+    cmd = ["yt-dlp", "--dump-json", "--no-playlist", url]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return json.loads(res.stdout)
+
+
+def download_youtube_audio(url: str, output_dir: Path, custom_title: str = None) -> Path:
+    if not shutil.which("yt-dlp"):
+        print("❌ Errore: 'yt-dlp' non è installato sul sistema.")
+        print("   Puoi installarlo su macOS con: brew install yt-dlp ffmpeg")
+        sys.exit(1)
+
+    print(f"\n🔍 Analisi metadati YouTube: {url} ...")
+    try:
+        info = fetch_youtube_info(url)
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Errore durante il recupero dei metadati da YouTube: {e}")
+        if e.stderr:
+            print(f"   Dettagli: {e.stderr.strip()}")
+        sys.exit(1)
+
+    title = custom_title or info.get("title", "Workout Music")
+    uploader = info.get("uploader") or info.get("channel") or "Unknown"
+    duration = int(info.get("duration") or 0)
+    yt_id = info.get("id", "")
+
+    safe_title = sanitize_filename(title)
+    mp3_filename = f"{safe_title}.mp3"
+    mp3_path = output_dir / mp3_filename
+
+    print(f"🎵 Titolo: {title}")
+    print(f"👤 Canale/Artista: {uploader}")
+    print(f"⏱️  Durata: {format_seconds(duration)}")
+    print(f"⬇️  Scaricamento audio e conversione in MP3 alta qualità...")
+
+    output_template = str(output_dir / f"{safe_title}.%(ext)s")
+    cmd = [
+        "yt-dlp",
+        "-x",
+        "--audio-format", "mp3",
+        "--audio-quality", "0",
+        "--embed-metadata",
+        "--no-playlist",
+        "-o", output_template,
+        url
+    ]
+
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Errore durante il download con yt-dlp: {e}")
+        sys.exit(1)
+
+    if not mp3_path.exists():
+        candidates = list(output_dir.glob(f"*{yt_id}*.mp3")) or list(output_dir.glob(f"{safe_title}*.mp3"))
+        if candidates:
+            mp3_path = candidates[0]
+        else:
+            print(f"⚠️  Download completato ma file MP3 non trovato con il nome atteso: {mp3_filename}")
+            sys.exit(1)
+
+    print(f"\n✅ Traccia salvata e pronta all'uso!")
+    print(f"   File: {mp3_path}")
+    print(f"   Puoi avviare l'allenamento con: ./trainer.py\n")
+    return mp3_path
+
+
+def get_audio_duration(filepath: Path) -> int:
+    """Restituisce la durata del file audio in secondi usando ffprobe o afinfo."""
+    filepath = Path(filepath)
+    if shutil.which("ffprobe"):
+        try:
+            res = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(filepath)],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return int(float(res.stdout.strip()))
+        except Exception:
+            pass
+
+    if shutil.which("afinfo"):
+        try:
+            res = subprocess.run(["afinfo", str(filepath)], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                match = re.search(r"estimated duration:\s*([\d.]+)\s*sec", res.stdout)
+                if match:
+                    return int(float(match.group(1)))
+        except Exception:
+            pass
+
+    return 0
+
+
 class MpvController:
-    def __init__(self, music_files, normal_volume=100, duck_volume=15):
-        self.music_files = [str(f) for f in music_files]
+    def __init__(self, track_file, start_seconds: int = 0, normal_volume: int = 100, duck_volume: int = 15):
+        if isinstance(track_file, (list, tuple)):
+            self.track_file = Path(track_file[0]).resolve()
+        else:
+            self.track_file = Path(track_file).resolve()
+        self.start_seconds = start_seconds
         self.normal_volume = normal_volume
         self.duck_volume = duck_volume
         self.sock_path = f"/tmp/workout_mpv_{os.getpid()}_{int(time.time())}.sock"
@@ -275,14 +383,11 @@ class MpvController:
         self.sock = None
 
     def start(self):
-        if not self.music_files:
-            raise RuntimeError("Nessun file audio specificato.")
+        if not self.track_file.exists():
+            raise RuntimeError(f"File audio non trovato: {self.track_file}")
 
         if os.path.exists(self.sock_path):
             os.remove(self.sock_path)
-
-        playlist = list(self.music_files)
-        random.shuffle(playlist)
 
         cmd = [
             "mpv",
@@ -290,9 +395,12 @@ class MpvController:
             "--really-quiet",
             f"--input-ipc-server={self.sock_path}",
             f"--volume={self.normal_volume}",
-            "--loop-playlist=inf",
-            "--"
-        ] + playlist
+            "--loop-file=inf",
+        ]
+        if self.start_seconds > 0:
+            cmd.append(f"--start={self.start_seconds}")
+
+        cmd.extend(["--", str(self.track_file)])
 
         self.proc = subprocess.Popen(cmd)
 
@@ -360,6 +468,11 @@ class MpvController:
 
 
 def format_seconds(seconds: int) -> str:
+    if seconds >= 3600:
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        s = seconds % 60
+        return f"{h:d}:{m:02d}:{s:02d}"
     m = seconds // 60
     s = seconds % 60
     return f"{m:02d}:{s:02d}"
@@ -478,18 +591,25 @@ class TVScreen:
         sys.stdout.flush()
 
 
-def run_workout(schedule, music_files, voice, engine, normal_vol, duck_vol, test_speed, db: VoiceDB):
+def run_workout(schedule, music_files, voice="elsa", engine="edge", normal_vol=100, duck_vol=15, test_speed=1.0, db: VoiceDB = None, start_offset: int = 0):
     total_time = sum(step["duration"] for step in schedule)
     total_steps = len(schedule)
 
     if engine == "edge":
         pregenerate_neural_cues(schedule, voice, db)
 
-    player = MpvController(music_files, normal_volume=normal_vol, duck_volume=duck_vol)
+    if isinstance(music_files, (list, tuple)):
+        chosen_track = Path(music_files[0])
+    else:
+        chosen_track = Path(music_files)
+
+    player = MpvController(chosen_track, start_seconds=start_offset, normal_volume=normal_vol, duck_volume=duck_vol)
     player.start()
 
     time_elapsed_total = 0
-    music_name = Path(music_files[0]).stem if music_files else "Musica"
+    music_name = chosen_track.stem
+    if len(music_name) > 24:
+        music_name = music_name[:21] + "..."
     voice_label = voice.replace("it-IT-", "").replace("Neural", "")
 
     screen = TVScreen()
@@ -574,6 +694,10 @@ def main():
     parser.add_argument("--test-speed", type=float, default=1.0, help="Moltiplicatore velocità per test (es. 10)")
     parser.add_argument("--list-samples", action="store_true", help="Mostra l'archivio delle frasi salvate nel DB SQLite")
     parser.add_argument("--clean-db", action="store_true", help="Pulisce i record e file orfani dal database e dalla cache")
+    parser.add_argument("--download-music", "-y", metavar="URL", help="Scarica audio da YouTube (URL), converte in MP3 e salva come sottofondo")
+    parser.add_argument("--title", help="Titolo personalizzato per il brano scaricato con --download-music")
+    parser.add_argument("--from-start", action="store_true", help="Avvia la traccia dall'inizio (00:00) invece che da un punto casuale")
+    parser.add_argument("--start", type=int, metavar="SECONDI", help="Punto di inizio riproduzione specifico in secondi")
     args = parser.parse_args()
 
     db = VoiceDB()
@@ -597,6 +721,11 @@ def main():
     if args.clean_db:
         rem_db, rem_files = db.clean_orphans()
         print(f"🧹 Pulizia completata: rimossi {rem_db} record orfani dal DB e {rem_files} file non utilizzati.")
+        return
+
+    if args.download_music:
+        dest_dir = Path(args.music).resolve() if (args.music and Path(args.music).is_dir()) else Path(".").resolve()
+        download_youtube_audio(args.download_music, dest_dir, custom_title=args.title)
         return
 
     scheda_path = Path(args.scheda).resolve()
@@ -627,19 +756,42 @@ def main():
 
     if not music_files:
         print("Errore: nessun file audio (.mp3 o .m4a) trovato nella cartella corrente o specificata con --music.")
+        print("💡 Puoi scaricare un brano da YouTube con: ./trainer.py --download-music <URL>")
         sys.exit(1)
+
+    # Scelta casuale del brano tra quelli disponibili (come in FlowLoop)
+    chosen_track = random.choice(music_files)
+    duration = get_audio_duration(chosen_track)
+
+    # Scelta casuale del punto di avvio (come in FlowLoop)
+    if args.start is not None:
+        start_offset = max(0, min(args.start, duration - 10 if duration > 10 else 0))
+    elif args.from_start or duration <= 60:
+        start_offset = 0
+    else:
+        max_start = max(0, duration - 45)
+        start_offset = random.randint(0, max_start)
+
+    print(f"🎵 Sottofondo musicale: {chosen_track.name}")
+    if len(music_files) > 1:
+        print(f"🎲 Traccia scelta casualmente tra {len(music_files)} brani disponibili.")
+    if duration > 0:
+        offset_info = format_seconds(start_offset) if start_offset > 0 else "00:00 (dall'inizio)"
+        print(f"⏱️  Durata traccia: {format_seconds(duration)} | Punto di avvio: {offset_info}")
 
     run_workout(
         schedule=schedule,
-        music_files=music_files,
+        music_files=chosen_track,
         voice=selected_voice,
         engine=args.engine,
         normal_vol=args.volume,
         duck_vol=args.duck_vol,
         test_speed=args.test_speed,
-        db=db
+        db=db,
+        start_offset=start_offset
     )
 
 
 if __name__ == "__main__":
     main()
+

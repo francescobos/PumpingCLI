@@ -47,9 +47,11 @@ Il rendering usa il buffer alternativo del terminale per evitare qualsiasi sfarf
    Utilizza le voci neurali Edge TTS (modelli Microsoft Azure in italiano: *Elsa*, *Diego*, *Isabella*, *Giuseppe*). Nessuna registrazione richiesta e zero costi. In alternativa è possibile usare la sintesi nativa macOS (`say`).
 3. **Archivio Hash & SQLite (`workout_cache.db`):**
    Ogni frase vocale viene generata una sola volta e salvata nella cache locale con hash SHA-256 univoco. I successivi avvii sono immediati e funzionano anche offline. Un database SQLite tiene traccia di testi, file audio e statistiche di utilizzo.
-4. **Gestione tracce musicali:**
-   Cerca in automatico i file `.mp3` o `.m4a` nella cartella. Se sono presenti più brani, li riproduce in modalità shuffle continuo.
-5. **Dashboard TV Full-Screen:**
+4. **Gestione tracce musicali intelligente & FlowLoop:**
+   Cerca in automatico i file `.mp3` o `.m4a` nella cartella. Seleziona una traccia in modo casuale e avvia la riproduzione da un punto casuale (offset dinamico), evitando di ascoltare sempre gli stessi minuti iniziali e ripetendo in loop seamless continuo.
+5. **Download da YouTube integrato:**
+   Permette di scaricare qualsiasi DJ mix o traccia da YouTube tramite URL, convertendolo automaticamente in MP3 ad alta qualità con metadati incorporati, pronto per essere utilizzato come sottofondo musicale.
+6. **Dashboard TV Full-Screen:**
    Timer gigante in caratteri ASCII `██`, barra di avanzamento grafica e anteprima dell'esercizio successivo.
 
 ---
@@ -58,9 +60,10 @@ Il rendering usa il buffer alternativo del terminale per evitare qualsiasi sfarf
 
 - **macOS** (o Linux con supporto audio)
 - **Python 3.9+**
-- **mpv** (per il controllo del volume in tempo reale)
+- **mpv** (per il controllo del volume in tempo reale e playback)
+- **yt-dlp** e **ffmpeg** (opzionali, per il download audio da YouTube)
   ```bash
-  brew install mpv
+  brew install mpv yt-dlp ffmpeg
   ```
 
 ---
@@ -123,6 +126,8 @@ Per la resa migliore sulla TV:
 usage: pumping.py [-h] [--scheda SCHEDA] [--voice VOICE] [--engine {edge,macos}]
                   [--music MUSIC] [--duck-vol DUCK_VOL] [--volume VOLUME]
                   [--test-speed TEST_SPEED] [--list-samples] [--clean-db]
+                  [--download-music URL] [--title TITLE] [--from-start]
+                  [--start SECONDI]
 
 options:
   -h, --help            Mostra questo messaggio di aiuto ed esce
@@ -135,7 +140,31 @@ options:
   --test-speed SPEED    Moltiplicatore velocità per collaudo rapido (es. 10)
   --list-samples        Mostra l'archivio delle frasi salvate nel DB SQLite
   --clean-db            Pulisce record e file orfani dal database e dalla cache
+  --download-music, -y URL
+                        Scarica audio da YouTube (URL), converte in MP3 e salva come sottofondo
+  --title TITLE         Titolo personalizzato per il brano scaricato con --download-music
+  --from-start          Avvia la traccia dall'inizio (00:00) invece che da un punto casuale
+  --start SECONDI       Punto di inizio riproduzione specifico in secondi
 ```
+
+### Esempi pratici
+
+- **Scaricare un video/mix da YouTube per il workout:**
+  ```bash
+  ./trainer.py --download-music "https://www.youtube.com/watch?v=..."
+  ```
+  *(oppure con titolo personalizzato: `./trainer.py -y "https://..." --title "Mix Allenamento Intenso"`)*
+
+- **Avviare l'allenamento con selezione casuale del brano e del punto di avvio:**
+  ```bash
+  ./trainer.py
+  ```
+
+- **Avviare l'allenamento partendo dal minuto 00:00 (senza punto casuale):**
+  ```bash
+  ./trainer.py --from-start
+  ```
+
 
 ---
 
