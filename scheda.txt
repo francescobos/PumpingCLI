@@ -1,0 +1,34 @@
+# ==============================================================================
+# SCHEDA DI ALLENAMENTO
+# ==============================================================================
+# Formato per riga:
+# <durata> | <messaggio del coach>
+#
+# Durate supportate:
+# - Secondi: 30s, 45s, 60s (oppure solo il numero: 30)
+# - Minuti: 1m, 2m, 3m
+# - Combinati: 1m30s, 2m15s, oppure formato 1:30
+#
+# Le righe che iniziano con '#' e le righe vuote vengono ignorate.
+# ==============================================================================
+
+# Riscaldamento iniziale: 2 minuti di musica
+20s   | Ok! Ora iniziamo il riscaldamento... saltelli sul posto!
+
+# Dopo 1 minuto: Jumping Jacks
+1m   | Ok! Jumping Jack! Diamo ritmo!
+
+# Dopo 1 minuto: Pausa
+1m   | Pausa di 30 secondi! Respira e preparati per i piegamenti.
+
+# Dopo 30 secondi: Esercizio
+30s  | Piegamenti sulle braccia! Forza, schiena dritta!
+
+# Dopo 1 minuto: Pausa
+1m   | Recupero di 30 secondi! Sciogli le braccia e bevi un sorso d'acqua.
+
+# Dopo 30 secondi: Addominali
+30s  | Crunch a terra! Contrai bene l'addome ad ogni ripetizione!
+
+# Dopo 1 minuto: Fine
+1m   | Grandissimo allenamento completato! Fai un po' di stretching per defaticare. Ottimo lavoro!

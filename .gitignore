@@ -1,0 +1,22 @@
+# Audio tracks & cache
+*.mp3
+*.m4a
+*.webm
+*.wav
+*.ogg
+.voice_cache/
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# OS artifacts
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
