@@ -336,7 +336,7 @@ def download_youtube_audio(url: str, output_dir: Path, custom_title: str = None)
 
     print(f"\n✅ Traccia salvata e pronta all'uso!")
     print(f"   File: {mp3_path}")
-    print(f"   Puoi avviare l'allenamento con: ./trainer.py\n")
+    print(f"   Puoi avviare l'allenamento con: ./pumping.py\n")
     return mp3_path
 
 
@@ -504,9 +504,9 @@ def render_big_time(time_str: str) -> list:
     return lines
 
 
-class TVScreen:
+class TerminalScreen:
     """
-    Gestisce il rendering a tutto schermo pulito per TV (nessun flickering).
+    Gestisce il rendering a tutto schermo pulito nel terminale (nessun flickering).
     """
     def __init__(self):
         # Entra nel buffer alternativo del terminale e nasconde il cursore
@@ -612,7 +612,7 @@ def run_workout(schedule, music_files, voice="elsa", engine="edge", normal_vol=1
         music_name = music_name[:21] + "..."
     voice_label = voice.replace("it-IT-", "").replace("Neural", "")
 
-    screen = TVScreen()
+    screen = TerminalScreen()
 
     try:
         for idx, step in enumerate(schedule, 1):
@@ -756,7 +756,7 @@ def main():
 
     if not music_files:
         print("Errore: nessun file audio (.mp3 o .m4a) trovato nella cartella corrente o specificata con --music.")
-        print("💡 Puoi scaricare un brano da YouTube con: ./trainer.py --download-music <URL>")
+        print("💡 Puoi scaricare un brano da YouTube con: ./pumping.py --download-music <URL>")
         sys.exit(1)
 
     # Scelta casuale del brano tra quelli disponibili (come in FlowLoop)

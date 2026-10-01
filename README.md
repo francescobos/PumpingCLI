@@ -1,6 +1,6 @@
 # PumpingCLI 🏋️‍♂️
 
-Un personal trainer da terminale progettato per lo schermo della TV.
+Un personal trainer da terminale con timer a caratteri giganti, musica di sottofondo con audio ducking e voce guida neurale.
 
 Metti una o più tracce musicali in una cartella, scrivi la scheda degli esercizi in un banale file di testo e lancia lo script. PumpingCLI suona la musica in sottofondo, abbassa il volume in stile DJ (audio ducking) quando è il momento di cambiare esercizio, ti dà le istruzioni con una voce neurale naturale in italiano e mostra a tutto schermo un timer a caratteri giganti leggibile dal divano o dal tappetino.
 
@@ -51,8 +51,8 @@ Il rendering usa il buffer alternativo del terminale per evitare qualsiasi sfarf
    Cerca in automatico i file `.mp3` o `.m4a` nella cartella. Seleziona una traccia in modo casuale e avvia la riproduzione da un punto casuale (offset dinamico), evitando di ascoltare sempre gli stessi minuti iniziali e ripetendo in loop seamless continuo.
 5. **Download da YouTube integrato:**
    Permette di scaricare qualsiasi DJ mix o traccia da YouTube tramite URL, convertendolo automaticamente in MP3 ad alta qualità con metadati incorporati, pronto per essere utilizzato come sottofondo musicale.
-6. **Dashboard TV Full-Screen:**
-   Timer gigante in caratteri ASCII `██`, barra di avanzamento grafica e anteprima dell'esercizio successivo.
+6. **Dashboard Full-Screen:**
+   Timer gigante in caratteri ASCII `██`, barra di avanzamento grafica e anteprima dell'esercizio successivo visibile anche a distanza.
 
 ---
 
@@ -113,8 +113,7 @@ Metti uno o più file `.mp3` o `.m4a` nella cartella del progetto (oppure specif
 ./pumping.py
 ```
 
-Per la resa migliore sulla TV:
-- Trasmetti lo schermo via AirPlay o HDMI.
+Per la resa migliore a schermo intero:
 - Metti la finestra del terminale a tutto schermo (`Cmd + Ctrl + F`).
 - Se necessario, aumenta la dimensione del font con `Cmd + +`.
 
@@ -151,18 +150,18 @@ options:
 
 - **Scaricare un video/mix da YouTube per il workout:**
   ```bash
-  ./trainer.py --download-music "https://www.youtube.com/watch?v=..."
+  ./pumping.py --download-music "https://www.youtube.com/watch?v=..."
   ```
-  *(oppure con titolo personalizzato: `./trainer.py -y "https://..." --title "Mix Allenamento Intenso"`)*
+  *(oppure con titolo personalizzato: `./pumping.py -y "https://..." --title "Mix Allenamento Intenso"`)*
 
 - **Avviare l'allenamento con selezione casuale del brano e del punto di avvio:**
   ```bash
-  ./trainer.py
+  ./pumping.py
   ```
 
 - **Avviare l'allenamento partendo dal minuto 00:00 (senza punto casuale):**
   ```bash
-  ./trainer.py --from-start
+  ./pumping.py --from-start
   ```
 
 
