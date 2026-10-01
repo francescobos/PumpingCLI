@@ -29,7 +29,9 @@ Il rendering usa il buffer alternativo del terminale per evitare qualsiasi sfarf
 
   Prossimo:  Pausa di 30 secondi! Respira e preparati.
 ────────────────────────────────────────────────────────────────────────────────
+ 📊  Totale workout: [████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 20%
  ⏱️  Trascorso: 02:00  │  Rimanente: 08:00  │  Totale: 10:00 
+ 🕒  Inizio: 18:30      │  Fine stimata: 18:40
  Premi Ctrl+C per interrompere
 ```
 

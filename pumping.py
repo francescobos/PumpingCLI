@@ -20,6 +20,7 @@ import subprocess
 import shutil
 import re
 from pathlib import Path
+from datetime import datetime, timedelta
 
 # Voci neurali predefinite in italiano
 NEURAL_VOICES = {
@@ -518,7 +519,7 @@ class TerminalScreen:
         sys.stdout.write("\033[?25h\033[?1049l\n")
         sys.stdout.flush()
 
-    def render(self, step_idx, total_steps, current_msg, next_msg, step_rem, step_dur, total_elapsed, total_time, music_name, voice_name):
+    def render(self, step_idx, total_steps, current_msg, next_msg, step_rem, step_dur, total_elapsed, total_time, music_name, voice_name, start_wall_time=None):
         import shutil
         cols, rows = shutil.get_terminal_size((80, 24))
         w = min(cols, 90)
@@ -548,7 +549,13 @@ class TerminalScreen:
         bar = "█" * filled + "░" * (bar_len - filled)
         pct = int(progress * 100)
 
+        # Progress bar totale workout
         total_rem = max(0, total_time - total_elapsed)
+        total_progress = min(1.0, max(0.0, total_elapsed / total_time)) if total_time > 0 else 1.0
+        total_pct = int(total_progress * 100)
+        total_bar_len = min(40, max(15, w - 30))
+        total_filled = int(total_progress * total_bar_len)
+        total_bar = "█" * total_filled + "░" * (total_bar_len - total_filled)
 
         # Costruzione frame
         lines = []
@@ -566,7 +573,7 @@ class TerminalScreen:
             lines.append(f"{time_color}{bold}{bline.center(w)}{reset}")
 
         lines.append("")
-        # Barra di avanzamento
+        # Barra di avanzamento esercizio
         bar_str = f"[{accent_color}{bar}{reset}] {bold}{pct}%{reset}"
         lines.append(bar_str.center(w + 10))
         lines.append("")
@@ -577,12 +584,27 @@ class TerminalScreen:
             lines.append(f"  {bold}🎉 Ultima fase dell'allenamento!{reset}")
 
         lines.append("─" * w)
-        info_footer = (
+        # Barra di avanzamento totale dell'allenamento
+        total_bar_str = f" 📊  Totale workout: [{accent_color}{total_bar}{reset}] {bold}{total_pct}%{reset}"
+        lines.append(total_bar_str)
+
+        info_time = (
             f" ⏱️  Trascorso: {bold}{format_seconds(total_elapsed)}{reset}  "
             f"│  Rimanente: {bold}{format_seconds(total_rem)}{reset}  "
-            f"│  Totale: {bold}{format_seconds(total_time)}{reset} "
+            f"│  Totale: {bold}{format_seconds(total_time)}{reset}"
         )
-        lines.append(info_footer)
+        lines.append(info_time)
+
+        if start_wall_time:
+            start_str = start_wall_time.strftime("%H:%M")
+            end_wall_time = datetime.now() + timedelta(seconds=total_rem)
+            end_str = end_wall_time.strftime("%H:%M")
+            info_clock = (
+                f" 🕒  Inizio: {bold}{start_str}{reset}      "
+                f"│  Fine stimata: {bold}{end_str}{reset}"
+            )
+            lines.append(info_clock)
+
         lines.append(f" {dim}Premi Ctrl+C per interrompere{reset}")
 
         # Stampa usando riposizionamento cursore home (\033[H) per evitare flicking
@@ -607,6 +629,7 @@ def run_workout(schedule, music_files, voice="elsa", engine="edge", normal_vol=1
     player.start()
 
     time_elapsed_total = 0
+    start_wall_time = datetime.now()
     music_name = chosen_track.stem
     if len(music_name) > 24:
         music_name = music_name[:21] + "..."
@@ -631,7 +654,8 @@ def run_workout(schedule, music_files, voice="elsa", engine="edge", normal_vol=1
                 total_elapsed=time_elapsed_total,
                 total_time=total_time,
                 music_name=music_name,
-                voice_name=voice_label
+                voice_name=voice_label,
+                start_wall_time=start_wall_time
             )
 
             player.duck()
@@ -651,7 +675,8 @@ def run_workout(schedule, music_files, voice="elsa", engine="edge", normal_vol=1
                     total_elapsed=time_elapsed_total,
                     total_time=total_time,
                     music_name=music_name,
-                    voice_name=voice_label
+                    voice_name=voice_label,
+                    start_wall_time=start_wall_time
                 )
 
                 sleep_chunk = min(1.0, remaining) / test_speed
@@ -670,7 +695,8 @@ def run_workout(schedule, music_files, voice="elsa", engine="edge", normal_vol=1
             total_elapsed=total_time,
             total_time=total_time,
             music_name=music_name,
-            voice_name=voice_label
+            voice_name=voice_label,
+            start_wall_time=start_wall_time
         )
         time.sleep(3)
 
