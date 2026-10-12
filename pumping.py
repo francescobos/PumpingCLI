@@ -2,7 +2,7 @@
 """
 Workout Audio Trainer con Database SQLite
 Riproduce musica in sottofondo con mpv e scandisce le sessioni di allenamento
-tramite sintesi vocale neurale HD (edge-tts) o macOS nativa (say).
+tramite sintesi vocale neurale (Gemini TTS o edge-tts) o macOS nativa (say).
 Archivia e traccia tutte le frasi, gli hash, i file generati e le statistiche
 di utilizzo in un database SQLite locale ('workout_cache.db').
 """
@@ -19,6 +19,9 @@ import argparse
 import subprocess
 import shutil
 import re
+import base64
+import urllib.error
+import urllib.request
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -30,6 +33,26 @@ NEURAL_VOICES = {
     "giuseppe": "it-IT-GiuseppeMultilingualNeural",
 }
 DEFAULT_NEURAL_VOICE = "it-IT-ElsaNeural"
+
+# Voci Gemini TTS (catalogo completo: GET /v1beta/voices)
+GEMINI_VOICES = {
+    "chiara": "it-it-csagent-1",
+    "sofia": "it-it-tutor-7",
+    "laura": "Laomedeia",
+}
+DEFAULT_GEMINI_VOICE = "chiara"
+GEMINI_MODEL = "gemini-3.8-flash-tts"
+GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
+DEFAULT_GEMINI_STYLE = "personal trainer italiano, energico e motivante, ritmo deciso"
+
+# Limiti per la generazione audio via rete
+TTS_TIMEOUT = 30
+MAX_CONSECUTIVE_FAILURES = 2
+
+# Rate limit Gemini (Tier 1: 10 richieste al minuto)
+GEMINI_MIN_INTERVAL = 6.5
+MAX_RATE_LIMIT_WAITS = 3
+MAX_RATE_LIMIT_WAIT_SECONDS = 120
 
 CACHE_DIR = Path(".voice_cache")
 DB_PATH = Path("workout_cache.db")
@@ -146,7 +169,7 @@ class VoiceDB:
             conn.commit()
 
         if CACHE_DIR.exists():
-            for f in CACHE_DIR.glob("*.mp3"):
+            for f in [*CACHE_DIR.glob("*.mp3"), *CACHE_DIR.glob("*.wav")]:
                 if f.resolve() not in valid_paths:
                     f.unlink()
                     removed_files += 1
@@ -240,60 +263,178 @@ def find_edge_tts_bin() -> str:
     return "edge-tts"
 
 
-def pregenerate_neural_cues(schedule, voice: str, db: VoiceDB):
+class TTSProvider:
+    """
+    Motore di sintesi con la sua chiave di cache nel DB.
+    'generate(text, target_file)' scrive l'audio o solleva un'eccezione.
+    """
+    def __init__(self, name: str, voice_key: str, ext: str, generate):
+        self.name = name
+        self.voice_key = voice_key
+        self.ext = ext
+        self.generate = generate
+
+
+class RateLimitError(RuntimeError):
+    """Il servizio chiede di riprovare dopo 'retry_after' secondi (HTTP 429)."""
+    def __init__(self, message: str, retry_after: float):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def wait_countdown(seconds: float, reason: str):
+    remaining = int(seconds + 0.999)
+    while remaining > 0:
+        print(f"\r   ⏳ {reason}: riprovo tra {remaining:3d}s ", end="", flush=True)
+        time.sleep(1)
+        remaining -= 1
+    print("\r" + " " * 80 + "\r", end="", flush=True)
+
+
+def generate_with_retry(provider: TTSProvider, text: str, target_file: Path):
+    """Su un 429 aspetta il tempo indicato dal servizio e riprova la stessa frase."""
+    for attempt in range(MAX_RATE_LIMIT_WAITS + 1):
+        try:
+            return provider.generate(text, target_file)
+        except RateLimitError as e:
+            if attempt == MAX_RATE_LIMIT_WAITS or e.retry_after > MAX_RATE_LIMIT_WAIT_SECONDS:
+                raise
+            wait_countdown(e.retry_after + 1, f"{provider.name}: limite di richieste raggiunto")
+
+
+def make_edge_provider(voice: str) -> TTSProvider:
+    edge_bin = find_edge_tts_bin()
+
+    def generate(text: str, target_file: Path):
+        cmd = [edge_bin, "--voice", voice, "--text", text, "--write-media", str(target_file)]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=TTS_TIMEOUT)
+        if res.returncode != 0 or not target_file.exists() or target_file.stat().st_size == 0:
+            last_line = res.stderr.strip().splitlines()[-1] if res.stderr.strip() else f"exit {res.returncode}"
+            raise RuntimeError(last_line[:200])
+
+    return TTSProvider("edge-tts", voice, "mp3", generate)
+
+
+def make_gemini_provider(voice_id: str, style: str, api_key: str) -> TTSProvider:
+    # Lo stile cambia l'intonazione: entra nella chiave di cache
+    voice_key = f"gemini:{voice_id}"
+    if style:
+        voice_key += ":" + hashlib.sha256(style.encode("utf-8")).hexdigest()[:6]
+    last_request = [0.0]
+
+    def generate(text: str, target_file: Path):
+        # Distanzia le richieste per restare sotto il limite al minuto
+        wait = GEMINI_MIN_INTERVAL - (time.time() - last_request[0])
+        if wait > 0:
+            time.sleep(wait)
+        last_request[0] = time.time()
+
+        content = {"type": "text", "text": text}
+        if style:
+            content["annotations"] = [{"type": "speech_metadata", "style": style}]
+        body = {
+            "model": GEMINI_MODEL,
+            "input": [{"type": "user_input", "content": [content]}],
+            "response_format": {"type": "audio"},
+            "generation_config": {"speech_config": [{"voice": voice_id}]},
+        }
+        req = urllib.request.Request(
+            GEMINI_ENDPOINT,
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=TTS_TIMEOUT) as r:
+                resp = json.load(r)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")
+            match = re.search(r'"message":\s*"([^"]+)"', detail)
+            message = f"HTTP {e.code}: {match.group(1) if match else detail[:200]}"
+            if e.code == 429:
+                delay = (re.search(r"retry in ([\d.]+)\s*s", detail)
+                         or re.search(r'"retryDelay":\s*"([\d.]+)s"', detail))
+                retry_after = float(delay.group(1)) if delay else float(e.headers.get("Retry-After") or 60)
+                raise RateLimitError(message, retry_after)
+            raise RuntimeError(message)
+
+        audio = next(
+            (part["data"] for step in resp.get("steps", []) for part in step.get("content", [])
+             if part.get("type") == "audio" and part.get("data")),
+            None,
+        )
+        if not audio:
+            raise RuntimeError(f"nessun audio nella risposta (status: {resp.get('status')})")
+        target_file.write_bytes(base64.b64decode(audio))
+
+    return TTSProvider("Gemini", voice_key, "wav", generate)
+
+
+def pregenerate_cues(schedule, providers, db: VoiceDB):
+    """
+    Genera le frasi mancanti provando i provider in ordine.
+    Un provider che fallisce MAX_CONSECUTIVE_FAILURES volte di fila viene escluso.
+    """
+    if not providers:
+        return
+
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     unique_messages = list(dict.fromkeys(step["message"] for step in schedule))
-    missing = []
-
-    for msg in unique_messages:
-        sample = db.get_sample(msg, voice)
-        if not sample:
-            h = db.compute_hash(msg, voice)
-            safe_prefix = "".join(c if c.isalnum() else "_" for c in msg[:18]).strip("_")
-            target_file = CACHE_DIR / f"{safe_prefix}_{h}.mp3"
-            missing.append((msg, target_file))
+    missing = [msg for msg in unique_messages
+               if not any(db.get_sample(msg, p.voice_key) for p in providers)]
 
     if not missing:
         print(f"✨ Tutte le frasi vocali ({len(unique_messages)}) sono già indicizzate nel DB e archiviate.")
         return
 
-    edge_bin = find_edge_tts_bin()
-    print(f"🎙️  Generazione audio neurale per {len(missing)} nuova/e frase/i (voce: {voice})...")
-    for i, (msg, target_file) in enumerate(missing, 1):
+    active = list(providers)
+    failures = {p.name: 0 for p in providers}
+    print(f"🎙️  Generazione audio per {len(missing)} nuova/e frase/i (motore: {active[0].name})...")
+
+    for i, msg in enumerate(missing, 1):
         print(f"   [{i}/{len(missing)}] Genero: \"{msg}\"")
-        try:
-            cmd = [edge_bin, "--voice", voice, "--text", msg, "--write-media", str(target_file)]
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode == 0 and target_file.exists():
-                db.save_sample(msg, voice, target_file)
-            else:
-                print(f"   [!] Errore nella generazione audio con edge-tts: {res.stderr}")
-                if target_file.exists():
-                    target_file.unlink()
-        except FileNotFoundError:
-            print(f"   [!] Eseguibile edge-tts non trovato nel PATH né in .venv. Installa edge-tts o attiva l'ambiente virtuale.")
+        for p in list(active):
+            h = db.compute_hash(msg, p.voice_key)
+            safe_prefix = "".join(c if c.isalnum() else "_" for c in msg[:18]).strip("_")
+            target_file = CACHE_DIR / f"{safe_prefix}_{h}.{p.ext}"
+            try:
+                generate_with_retry(p, msg, target_file)
+                db.save_sample(msg, p.voice_key, target_file)
+                failures[p.name] = 0
+                break
+            except FileNotFoundError:
+                print(f"   [!] Eseguibile {p.name} non trovato nel PATH né in .venv.")
+                failures[p.name] = MAX_CONSECUTIVE_FAILURES
+            except subprocess.TimeoutExpired:
+                print(f"   [!] {p.name}: nessuna risposta entro {TTS_TIMEOUT}s.")
+                failures[p.name] += 1
+            except Exception as e:
+                print(f"   [!] {p.name}: {e}")
+                failures[p.name] += 1
+
             if target_file.exists():
                 target_file.unlink()
-            break
-        except Exception as e:
-            print(f"   [!] Eccezione: {e}")
-            if target_file.exists():
-                target_file.unlink()
+            if failures[p.name] >= MAX_CONSECUTIVE_FAILURES:
+                active.remove(p)
+                fallback = active[0].name if active else "la voce di sistema (say)"
+                print(f"   [!] {p.name} non raggiungibile: d'ora in poi uso {fallback}.")
 
-    print("✅ Voci archiviate nel DB SQLite con successo.\n")
+        if not active:
+            print("   [!] Nessun motore neurale disponibile: le frasi mancanti useranno say.\n")
+            return
+
+    print("✅ Voci archiviate nel DB SQLite.\n")
 
 
-def play_cue(text: str, voice: str, engine: str, db: VoiceDB):
-    if engine == "edge":
-        sample = db.get_sample(text, voice)
+def play_cue(text: str, providers, db: VoiceDB, mac_voice: str = None):
+    for p in providers:
+        sample = db.get_sample(text, p.voice_key)
         if sample:
             subprocess.run(["afplay", str(sample["file_path"])])
-            db.record_play(text, voice)
+            db.record_play(text, p.voice_key)
             return
 
     # Fallback macOS say
     cmd = ["say"]
-    mac_voice = "Alice" if engine == "edge" else voice
     if mac_voice:
         cmd.extend(["-v", mac_voice])
     cmd.append(text)
@@ -645,12 +786,11 @@ class TerminalScreen:
         sys.stdout.flush()
 
 
-def run_workout(schedule, music_files, voice="elsa", engine="edge", normal_vol=100, duck_vol=15, test_speed=1.0, db: VoiceDB = None, start_offset: int = 0):
+def run_workout(schedule, music_files, providers, voice_label, mac_voice=None, normal_vol=100, duck_vol=15, test_speed=1.0, db: VoiceDB = None, start_offset: int = 0):
     total_time = sum(step["duration"] for step in schedule)
     total_steps = len(schedule)
 
-    if engine == "edge":
-        pregenerate_neural_cues(schedule, voice, db)
+    pregenerate_cues(schedule, providers, db)
 
     if isinstance(music_files, (list, tuple)):
         chosen_track = Path(music_files[0])
@@ -665,7 +805,6 @@ def run_workout(schedule, music_files, voice="elsa", engine="edge", normal_vol=1
     music_name = chosen_track.stem
     if len(music_name) > 24:
         music_name = music_name[:21] + "..."
-    voice_label = voice.replace("it-IT-", "").replace("Neural", "")
 
     screen = TerminalScreen()
 
@@ -691,7 +830,7 @@ def run_workout(schedule, music_files, voice="elsa", engine="edge", normal_vol=1
             )
 
             player.duck()
-            play_cue(msg, voice=voice, engine=engine, db=db)
+            play_cue(msg, providers, db, mac_voice=mac_voice)
             player.unduck()
 
             # Countdown dell'esercizio
@@ -739,13 +878,52 @@ def run_workout(schedule, music_files, voice="elsa", engine="edge", normal_vol=1
         player.stop()
         print("\n\n👋 Sessione terminata.")
 
+def load_dotenv(path: Path):
+    """Carica le variabili da un file .env senza sovrascrivere quelle già impostate."""
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
+def build_providers(engine: str, voice_arg: str = None, style_arg: str = None):
+    """
+    Restituisce (provider in ordine di priorità, etichetta voce, voce per say).
+    Con gemini, edge-tts resta come riserva; say è sempre l'ultima risorsa.
+    """
+    edge_alias = os.environ.get("EDGE_VOICE") or "elsa"
+
+    if engine == "macos":
+        return [], voice_arg or "say", voice_arg
+
+    if engine == "edge":
+        alias = voice_arg or edge_alias
+        return [make_edge_provider(NEURAL_VOICES.get(alias.lower(), alias))], alias, "Alice"
+
+    alias = voice_arg or os.environ.get("GEMINI_VOICE") or DEFAULT_GEMINI_VOICE
+    edge_fallback = make_edge_provider(NEURAL_VOICES.get(edge_alias.lower(), edge_alias))
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        print("⚠️  GEMINI_API_KEY non impostata (.env): uso edge-tts.")
+        return [edge_fallback], edge_alias, "Alice"
+
+    style = style_arg if style_arg is not None else os.environ.get("GEMINI_STYLE", DEFAULT_GEMINI_STYLE)
+    gemini = make_gemini_provider(GEMINI_VOICES.get(alias.lower(), alias), style, api_key)
+    return [gemini, edge_fallback], alias, "Alice"
 
 
 def main():
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+
     parser = argparse.ArgumentParser(description="Workout Audio Trainer con background music, voice coach e database SQLite.")
     parser.add_argument("--scheda", "-s", default="scheda.txt", help="Percorso del file scheda (default: scheda.txt)")
-    parser.add_argument("--voice", "-v", default="elsa", help="Voce: 'elsa', 'diego', 'isabella', 'giuseppe' (default: elsa)")
-    parser.add_argument("--engine", choices=["edge", "macos"], default="edge", help="Motore voce: 'edge' (neurale HD, default) o 'macos' (locale say)")
+    parser.add_argument("--voice", "-v", help="Voce: gemini 'chiara', 'sofia', 'laura' o un ID del catalogo; edge 'elsa', 'diego', 'isabella', 'giuseppe' (default da .env)")
+    parser.add_argument("--engine", choices=["gemini", "edge", "macos"], help="Motore voce: 'gemini', 'edge' o 'macos' (default: TTS_ENGINE in .env, altrimenti edge)")
+    parser.add_argument("--style", help="Stile di lettura per Gemini (default: GEMINI_STYLE in .env)")
     parser.add_argument("--music", "-m", help="File o cartella mp3 specifica")
     parser.add_argument("--duck-vol", type=int, default=15, help="Volume durante gli annunci (0-100, default: 15)")
     parser.add_argument("--volume", type=int, default=100, help="Volume normale della musica (0-100, default: 100)")
@@ -767,11 +945,12 @@ def main():
         else:
             print("\n📋 ARCHIVIO CAMPIONI AUDIO (workout_cache.db)")
             print("-" * 80)
-            print(f"{'HASH':<18} | {'VOCE':<12} | {'USI':<5} | {'TESTO'}")
+            print(f"{'HASH':<18} | {'VOCE':<20} | {'USI':<5} | {'TESTO'}")
             print("-" * 80)
             for h, voice, play_cnt, last_used, text in samples:
-                short_voice = voice.replace("it-IT-", "").replace("Neural", "")
-                print(f"{h:<18} | {short_voice:<12} | {play_cnt:<5} | {text}")
+                short_voice = voice.replace("it-IT-", "").replace("Neural", "").split(":")
+                short_voice = short_voice[1] if short_voice[0] == "gemini" else short_voice[0]
+                print(f"{h:<18} | {short_voice:<20} | {play_cnt:<5} | {text}")
             print("-" * 80)
             print(f"Totale frasi archiviate: {len(samples)}\n")
         return
@@ -796,9 +975,11 @@ def main():
         print(f"Errore: nessuna riga valida trovata in '{scheda_path}'.")
         sys.exit(1)
 
-    selected_voice = args.voice
-    if args.engine == "edge":
-        selected_voice = NEURAL_VOICES.get(args.voice.lower(), args.voice)
+    engine = args.engine or os.environ.get("TTS_ENGINE", "edge").lower()
+    if engine not in ("gemini", "edge", "macos"):
+        print(f"Errore: TTS_ENGINE '{engine}' non valido (usa gemini, edge o macos).")
+        sys.exit(1)
+    providers, voice_label, mac_voice = build_providers(engine, args.voice, args.style)
 
     # Ricerca tracce musicali
     music_files = []
@@ -840,8 +1021,9 @@ def main():
     run_workout(
         schedule=schedule,
         music_files=chosen_track,
-        voice=selected_voice,
-        engine=args.engine,
+        providers=providers,
+        voice_label=voice_label,
+        mac_voice=mac_voice,
         normal_vol=args.volume,
         duck_vol=args.duck_vol,
         test_speed=args.test_speed,

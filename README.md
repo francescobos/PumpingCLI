@@ -45,8 +45,13 @@ Il rendering usa il buffer alternativo del terminale per evitare qualsiasi sfarf
 
 1. **Audio Ducking Hardware / Locale:**
    La musica di sottofondo viene riprodotta tramite `mpv` (controllato via IPC socket). Quando la voce guida parla, la musica sfuma istantaneamente al 15% del volume, per poi risalire dolcemente al 100% a frase conclusa.
-2. **Sintesi Vocale Neurale HD (Gratuita):**
-   Utilizza le voci neurali Edge TTS (modelli Microsoft Azure in italiano: *Elsa*, *Diego*, *Isabella*, *Giuseppe*). Nessuna registrazione richiesta e zero costi. In alternativa è possibile usare la sintesi nativa macOS (`say`).
+2. **Sintesi Vocale Neurale con riserva automatica:**
+   Tre motori, scelti con `--engine` o con `TTS_ENGINE` nel file `.env`:
+   - **Gemini TTS** (consigliato): API ufficiale Google, piano gratuito con una API key di AI Studio. Voci preimpostate: *Chiara*, *Sofia*, *Laura*, oppure qualunque ID del catalogo Gemini. Lo stile di lettura si regola con `--style` o `GEMINI_STYLE`.
+   - **Edge TTS**: voci neurali Microsoft in italiano (*Elsa*, *Diego*, *Isabella*, *Giuseppe*), senza registrazione. È un servizio non ufficiale e può smettere di rispondere senza preavviso.
+   - **macOS `say`**: sintesi locale, sempre disponibile.
+
+   Con Gemini, se la generazione fallisce due volte di fila lo script passa a Edge TTS e poi a `say`. Ogni chiamata di rete ha un timeout di 30 secondi.
 3. **Archivio Hash & SQLite (`workout_cache.db`):**
    Ogni frase vocale viene generata una sola volta e salvata nella cache locale con hash SHA-256 univoco. I successivi avvii sono immediati e funzionano anche offline. Un database SQLite tiene traccia di testi, file audio e statistiche di utilizzo.
 4. **Gestione tracce musicali intelligente & FlowLoop:**
@@ -82,6 +87,45 @@ Il rendering usa il buffer alternativo del terminale per evitare qualsiasi sfarf
    ```bash
    pip install -r requirements.txt
    ```
+
+3. Copia il file di configurazione e inserisci la tua API key di [Google AI Studio](https://aistudio.google.com/apikey) in `GEMINI_API_KEY`:
+   ```bash
+   cp .env.example .env
+   ```
+   Il file `.env` è escluso da git. Senza API key lo script userà Edge TTS.
+
+---
+
+## Configurazione (`.env`)
+
+`.env.example` contiene tutte le opzioni: quelle per Gemini sono attive, le altre sono commentate. Per cambiare impostazione basta togliere il `#` dalla riga che ti serve e commentare quella attiva.
+
+| Variabile | Valori | Default se assente |
+|---|---|---|
+| `TTS_ENGINE` | `gemini`, `edge`, `macos` | `edge` |
+| `GEMINI_API_KEY` | API key di Google AI Studio | nessuna: si passa a Edge TTS |
+| `GEMINI_VOICE` | `chiara`, `sofia`, `laura` o un ID del catalogo Gemini | `chiara` |
+| `GEMINI_STYLE` | testo libero sull'intonazione; vuoto = nessuno stile | `personal trainer italiano, energico e motivante, ritmo deciso` |
+| `EDGE_VOICE` | `elsa`, `isabella`, `diego`, `giuseppe` | `elsa` |
+
+**Voci Gemini preimpostate**
+
+| Alias | ID Gemini | Carattere |
+|---|---|---|
+| `chiara` | `it-it-csagent-1` | 36 anni, nitida e decisa |
+| `sofia` | `it-it-tutor-7` | 25 anni, sicura e chiara |
+| `laura` | `Laomedeia` | energica, tono alto |
+
+Il catalogo completo (oltre 2.000 voci, di cui 53 native italiane) si legge con `GET https://generativelanguage.googleapis.com/v1beta/voices`; ogni ID si può usare direttamente in `GEMINI_VOICE` o con `--voice`.
+
+**Regole da sapere**
+- Le opzioni da riga di comando (`--engine`, `--voice`, `--style`) hanno la precedenza sul `.env` e valgono solo per quella sessione.
+- Ogni motore ha la sua voce: `--voice` cambia quella del motore attivo.
+- `EDGE_VOICE` serve anche come riserva: se Gemini fallisce due volte di fila, lo script passa a Edge TTS e poi a `say`.
+- Gemini ha un limite di richieste al minuto (10 nel Tier 1): lo script distanzia le chiamate di 6,5 secondi e, se riceve comunque un errore 429, aspetta il tempo indicato dal servizio e riprova la stessa frase. Con 25 frasi nuove la prima generazione richiede circa 3 minuti; dopo, la cache rende l'avvio immediato.
+- Lo stile fa parte della chiave di cache: se cambi `GEMINI_STYLE`, al primo avvio le frasi vengono rigenerate.
+- I commenti vanno su righe a parte: `GEMINI_VOICE=sofia # commento` non è supportato.
+- Con `TTS_ENGINE=macos` la voce si sceglie solo con `--voice` (es. `--voice Alice`).
 
 ---
 
@@ -124,7 +168,8 @@ Per la resa migliore a schermo intero:
 ## Opzioni da riga di comando
 
 ```text
-usage: pumping.py [-h] [--scheda SCHEDA] [--voice VOICE] [--engine {edge,macos}]
+usage: pumping.py [-h] [--scheda SCHEDA] [--voice VOICE]
+                  [--engine {gemini,edge,macos}] [--style STYLE]
                   [--music MUSIC] [--duck-vol DUCK_VOL] [--volume VOLUME]
                   [--test-speed TEST_SPEED] [--list-samples] [--clean-db]
                   [--download-music URL] [--title TITLE] [--from-start]
@@ -133,8 +178,11 @@ usage: pumping.py [-h] [--scheda SCHEDA] [--voice VOICE] [--engine {edge,macos}]
 options:
   -h, --help            Mostra questo messaggio di aiuto ed esce
   --scheda, -s SCHEDA   Percorso del file scheda (default: scheda.txt)
-  --voice, -v VOICE     Voce: 'elsa', 'diego', 'isabella', 'giuseppe' (default: elsa)
-  --engine {edge,macos} Motore voce: 'edge' (neurale HD) o 'macos' (locale say)
+  --voice, -v VOICE     Voce: gemini 'chiara', 'sofia', 'laura' o un ID del catalogo;
+                        edge 'elsa', 'diego', 'isabella', 'giuseppe' (default da .env)
+  --engine {gemini,edge,macos}
+                        Motore voce (default: TTS_ENGINE in .env, altrimenti edge)
+  --style STYLE         Stile di lettura per Gemini (default: GEMINI_STYLE in .env)
   --music, -m MUSIC     File o cartella mp3 specifica
   --duck-vol DUCK_VOL   Volume della musica durante gli annunci (0-100, default: 15)
   --volume VOLUME       Volume normale della musica (0-100, default: 100)
@@ -164,6 +212,13 @@ options:
 - **Avviare l'allenamento partendo dal minuto 00:00 (senza punto casuale):**
   ```bash
   ./pumping.py --from-start
+  ```
+
+- **Cambiare voce o motore per una sola sessione:**
+  ```bash
+  ./pumping.py --voice sofia
+  ./pumping.py --engine edge --voice diego
+  ./pumping.py --style "calmo e rilassato, ritmo lento"
   ```
 
 

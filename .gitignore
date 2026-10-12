@@ -24,3 +24,6 @@ venv/
 ._*
 .Spotlight-V100
 .Trashes
+
+# Secrets
+.env
