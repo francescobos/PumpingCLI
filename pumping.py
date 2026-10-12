@@ -214,6 +214,32 @@ def load_schedule(filepath: Path):
     return schedule
 
 
+def find_edge_tts_bin() -> str:
+    """
+    Risolve il percorso dell'eseguibile edge-tts.
+    Cerca nell'ordine:
+    1. PATH di sistema
+    2. Stessa directory dell'interprete Python corrente (sys.executable)
+    3. Virtual environment locale .venv rispetto allo script o alla working directory
+    """
+    bin_path = shutil.which("edge-tts")
+    if bin_path:
+        return bin_path
+
+    py_dir = Path(sys.executable).parent
+    candidate = py_dir / "edge-tts"
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate)
+
+    script_dir = Path(__file__).resolve().parent
+    for base in [script_dir, Path.cwd()]:
+        candidate = base / ".venv" / "bin" / "edge-tts"
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    return "edge-tts"
+
+
 def pregenerate_neural_cues(schedule, voice: str, db: VoiceDB):
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     unique_messages = list(dict.fromkeys(step["message"] for step in schedule))
@@ -231,11 +257,12 @@ def pregenerate_neural_cues(schedule, voice: str, db: VoiceDB):
         print(f"✨ Tutte le frasi vocali ({len(unique_messages)}) sono già indicizzate nel DB e archiviate.")
         return
 
+    edge_bin = find_edge_tts_bin()
     print(f"🎙️  Generazione audio neurale per {len(missing)} nuova/e frase/i (voce: {voice})...")
     for i, (msg, target_file) in enumerate(missing, 1):
         print(f"   [{i}/{len(missing)}] Genero: \"{msg}\"")
         try:
-            cmd = ["edge-tts", "--voice", voice, "--text", msg, "--write-media", str(target_file)]
+            cmd = [edge_bin, "--voice", voice, "--text", msg, "--write-media", str(target_file)]
             res = subprocess.run(cmd, capture_output=True, text=True)
             if res.returncode == 0 and target_file.exists():
                 db.save_sample(msg, voice, target_file)
@@ -243,6 +270,11 @@ def pregenerate_neural_cues(schedule, voice: str, db: VoiceDB):
                 print(f"   [!] Errore nella generazione audio con edge-tts: {res.stderr}")
                 if target_file.exists():
                     target_file.unlink()
+        except FileNotFoundError:
+            print(f"   [!] Eseguibile edge-tts non trovato nel PATH né in .venv. Installa edge-tts o attiva l'ambiente virtuale.")
+            if target_file.exists():
+                target_file.unlink()
+            break
         except Exception as e:
             print(f"   [!] Eccezione: {e}")
             if target_file.exists():
