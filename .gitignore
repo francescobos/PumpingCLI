@@ -1,5 +1,6 @@
 # Local workout files
-scheda.txt
+scheda*.txt
+!scheda_example.txt
 
 # Audio tracks & cache
 *.mp3
